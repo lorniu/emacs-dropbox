@@ -1,0 +1,9 @@
+# -*- mode: gitignore; -*-
+
+*~
+\#*\#
+*.elc
+auto-save-list
+tramp
+.\#*
+.dir-locals.el
