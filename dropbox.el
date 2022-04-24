@@ -715,7 +715,6 @@ It will search all files, with a prefix CHOOSE-DIR will allow you specify a dir 
       (user-error "Maybe you input a invalid path"))
     (browse-url (concat home path))))
 
-;;;###autoload
 (add-to-list 'file-name-handler-alist
              `(,(concat "\\`" dropbox-prefix) . dropbox-handler))
 
