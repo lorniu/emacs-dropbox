@@ -474,8 +474,7 @@ Ready and go?" app-url)))
    ((and (dropbox-file-p file) (not (dropbox-file-p newname)))
     (rename-file (file-local-copy file) newname))
    ((and (not (dropbox-file-p file)) (dropbox-file-p newname))
-    (dropbox-req 'upload file newname)
-    (revert-buffer))))
+    (dropbox-req 'upload file newname))))
 
 (defun dropbox-handle:copy-directory (directory newname &optional keep-time parents copy-contents)
   (cond
@@ -546,9 +545,10 @@ Ready and go?" app-url)))
 
   (cl-labels ((create-row (name metadata)
                 (let* ((attrs (dropbox-handle:file-attributes name nil metadata))
-                       (a (format "  %s %2d %8s %8s %8d %s "
-                                  (elt attrs 8) (elt attrs 1) (elt attrs 2) (elt attrs 3) (elt attrs 7)
-                                  (format-time-string "%X" (elt attrs 4))))
+                       (a (format "  %s %2d %2s %2s %8s %s "
+                                  (elt attrs 8) (elt attrs 1) (elt attrs 2) (elt attrs 3)
+                                  (file-size-human-readable (elt attrs 7))
+                                  (format-time-string "%Y-%m-%d %H:%M" (elt attrs 4))))
                        (s (with-temp-buffer
                             (insert name "\n")
                             (put-text-property (point-min) (- (point-max) 1) 'dired-filename t)
@@ -570,7 +570,10 @@ Ready and go?" app-url)))
                 (allocated (alist-get 'allocated (alist-get 'allocation usage))))
             (with-silent-modifications
               (goto-char (point-max))
-              (insert (format "  used %d, available %d (%.0f%% total used)\n" used (- allocated used) (/ (* used 100.0) allocated)))))
+              (insert (format "  dropbox: total %s, available %s (%.0f%% used)\n"
+                              (file-size-human-readable allocated)
+                              (file-size-human-readable (- allocated used))
+                              (/ (* used 100.0) allocated)))))
 
           (dropbox-req 'list filename
             (lambda (entries)
