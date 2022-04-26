@@ -596,16 +596,19 @@ Ready and go?" app-url)))
 
 (defun dropbox-handle:insert-file-contents (filename &optional visit _beg _end replace)
   (dropbox-info "[handler] insert-file-contents: %s" filename)
-  (barf-if-buffer-read-only)
-  (if (file-exists-p filename)
-      (save-excursion
-        (if replace (erase-buffer))
-        (with-silent-modifications
-          (insert (dropbox-encode-coding-string (dropbox-req 'download filename)))))
-    (set-buffer-modified-p nil))
-  (when visit
-    (setf buffer-file-name filename)
-    (setf buffer-read-only (not (file-writable-p filename)))))
+  (condition-case err
+      (let (count)
+        (when (file-exists-p filename)
+          (let ((s (dropbox-encode-coding-string (dropbox-req 'download filename))))
+            (if replace (erase-buffer))
+            (setq count (length s))
+            (save-excursion (insert s))))
+        (when visit
+          (setf buffer-file-name filename)
+          (setf buffer-read-only (not (file-writable-p filename)))
+          (set-visited-file-modtime (current-time))) ; assume that no concurrent edit
+        (cons filename count))
+    (error (kill-buffer) (signal 'user-error (cdr err)))))
 
 (defun dropbox-handle:write-region (beg end filename &optional append visit _lockname _mustbenew)
   (dropbox-info "[handler] write-region: %s, %s, %s" filename beg end)
@@ -674,6 +677,7 @@ Ready and go?" app-url)))
 (defun dropbox-handle:set-file-modes (&rest _) nil)
 (defun dropbox-handle:set-file-times (&rest _) nil)
 (defun dropbox-handle:set-visited-file-modtime (&rest _) nil)
+(defun dropbox-handle:verify-visited-file-modtime (&optional _buf) t)
 (defun dropbox-handle:file-selinux-context (&rest _) nil)
 
 
