@@ -46,10 +46,6 @@ Thank you all to teach me a lot:
 - https://github.com/andreafabrizi/Dropbox-Uploader
 - https://www.dropbox.com/developers/documentation/http/documentation
 
-## Unresovled problems
-
-- [ ] When opening a remote file, warning `File exists, but cannot be read`, boring but can't locate
-
 ## Anything else?
 
 For me, it's enough. Yet, issues and PRs are welcome.
