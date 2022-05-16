@@ -5,7 +5,7 @@
 ;; Author: lorniu <lorniu@gmail.com>
 ;; URL: https://github.com/lorniu/emacs-dropbox
 ;; Package-Requires: ((emacs "27.1"))
-;; Keywords: applications
+;; Keywords: tools
 ;; SPDX-License-Identifier: MIT
 ;; Version: 1.0
 
@@ -19,11 +19,16 @@
 ;; 3. Then use `dropbox-find` to search and pick file,
 ;;    Use `C-x C-f /db:` or `C-x C-f /db:/PATH-ON-DROPBOX` to open file
 ;;
+
 ;;; Code:
 
 (require 'json)
 (require 'cl-lib)
 (require 'url-http)
+
+(eval-when-compile
+  (defvar url-http-end-of-headers)
+  (defvar url-http-response-status))
 
 (defgroup dropbox nil
   "Dropbox on Emacs."
@@ -48,7 +53,7 @@
 (defun dropbox-info (fmt-string &rest args)
   "Used to output debug info."
   (when dropbox-debug
-    (apply 'message (concat "\t[Dropbox] " fmt-string) args)))
+    (apply #'message (concat "\t[Dropbox] " fmt-string) args)))
 
 (defun dropbox-normalize (path &optional force-prefix-p)
   "Normalize PATH to the right format."
@@ -199,7 +204,7 @@ Ready and go?" app-url)))
         (cl-loop for line in (split-string (buffer-string) "\n")
                  if (string-match-p "=" line)
                  collect (let* ((linepair (split-string line "="))
-                                (key (intern (concat ":" (string-replace "oauth_" "" (downcase (car linepair))))))
+                                (key (intern (concat ":" (replace-regexp-in-string "oauth_" "" (downcase (car linepair))))))
                                 (value (cadr linepair)))
                            (cons key value ))
                  into fs finally return
@@ -405,7 +410,10 @@ Ready and go?" app-url)))
 (defun dropbox-handle:file-exists-p (filename)
   (dropbox-info "[handler] file-exists-p: %s" filename)
   (setq filename (dropbox-normalize filename))
-  (cond ((string-match-p "/\\." filename) t) ; for performance
+  ;; patch for some special cases, for performance
+  (cond ((string-match-p "^/?$" filename) t)
+        ((string-match-p "~/" filename) nil)
+        ((string-match-p "[/.]tags$" filename) nil) ; citre
         (t (ignore-errors
              (or (alist-get 'metadata (cdr (dropbox--find-cached filename)))
                  (dropbox-req 'metadata filename))))))
@@ -436,7 +444,11 @@ Ready and go?" app-url)))
     ((user) "")
     ((host) "")
     ((localname) (dropbox-normalize file))
-    (t dropbox-prefix)))
+    (t (concat dropbox-prefix "/"))))
+
+(defun dropbox-handle:expand-file-name (name &optional dir)
+  (if (string-prefix-p dropbox-prefix name) name
+    (dropbox-run-real-handler #'expand-file-name (list name dir))))
 
 (defun dropbox-handle:file-name-directory (filename)
   (if (string-match (concat "^\\(" dropbox-prefix ".*/\\).*$") filename)
@@ -681,14 +693,28 @@ Ready and go?" app-url)))
 (defun dropbox-handle:file-selinux-context (&rest _) nil)
 
 
+;;; Patches
+
+(declare-function project--find-in-directory "ext:project.el" t t)
+
+(defun dropbox-project--find-in-directory-advice (fn dir)
+  "Tell directly which is the project root."
+  (if (dropbox-file-p dir)
+      (cons 'transient dropbox-prefix)
+    (funcall fn dir)))
+
+(advice-add #'project--find-in-directory :around #'dropbox-project--find-in-directory-advice)
+
+
 
 ;;;###autoload
 (defun dropbox-find (&optional choose-dir)
   "Search files from Dropbox and open it.
-It will search all files, with a prefix CHOOSE-DIR will allow you specify a dir to search."
+It will search all files, with a prefix CHOOSE-DIR
+will allow you specify a dir to search."
   (interactive "P")
   (let ((input (read-string "Search Dropbox with: ")))
-    (when (< (length (string-replace " " "" input)) 1)
+    (when (< (length (replace-regexp-in-string " " "" input)) 1)
       (user-error "Maybe input is too short"))
     (let* ((dir (when choose-dir
                   (let* ((def (if (dropbox-file-p default-directory) (dropbox-normalize default-directory)))
