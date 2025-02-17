@@ -540,7 +540,7 @@ Ready and go?" app-url)))
 (defun dropbox-handle:file-attributes (filename &optional _id-format ometadata)
   (setq filename (dropbox-normalize filename))
   (let* ((meta (or ometadata
-                   (when-let ((file (dropbox--find-cached filename)))
+                   (when-let* ((file (dropbox--find-cached filename)))
                      (alist-get 'metadata file))))
          (date (date-to-time (or (alist-get 'client_modified meta) "Mon, 01 Jan 0000 00:00:00 +0000")))
          (folder (if meta (string= "folder" (alist-get '.tag meta)) (file-directory-p filename)))
