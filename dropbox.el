@@ -27,6 +27,7 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'dired)
 (require 'pdd)
 
 (defgroup dropbox nil
@@ -68,6 +69,19 @@
 
 (defun dropbox-file-p (filename)
   (string-prefix-p dropbox-prefix filename))
+
+(defun dropbox-temp-file-buffer (filename content &optional pop rw post)
+  (let* ((prefix (concat (file-name-sans-extension (file-name-nondirectory filename)) "-"))
+         (extension (file-name-extension filename))
+         (inhibit-message t)
+         (message-log-max nil)
+         (tempfile (make-temp-file prefix nil (if extension (concat "." extension)) content)))
+    (with-current-buffer (find-file-noselect tempfile)
+      (unless rw (view-mode))
+      (if pop (pop-to-buffer (current-buffer) (if (consp pop) pop)))
+      (add-hook 'kill-buffer-hook (lambda () (ignore-errors (delete-file buffer-file-name))) nil t)
+      (if post (funcall post))
+      (current-buffer))))
 
 
 ;;; API
@@ -122,7 +136,7 @@
 
 (defun dropbox--list-folder (path)
   (dropbox-request "https://api.dropboxapi.com/2/files/list_folder"
-    :cache '(3 list (data . path))
+    :cache '(3 folder (data . path))
     :headers '(t json)
     :data `((path . ,(dropbox-normalize path))
             (recursive . :json-false)
@@ -130,8 +144,19 @@
             (include_deleted . :json-false)
             (include_has_explicit_shared_members . :json-false)
             (include_mounted_folders . t))
-    :done (lambda (entries)
-            (cl-coerce (alist-get 'entries entries) 'list))))
+    :done (lambda (result)
+            (cl-coerce (alist-get 'entries result) 'list))))
+
+(defun dropbox--list-revisions (path &optional limit)
+  (dropbox-request "https://api.dropboxapi.com/2/files/list_revisions"
+    :cache '(3 revisions (data . path) (data . limit))
+    :headers '(t json)
+    :data `((path . ,(dropbox-normalize path))
+            (mode . path)
+            (limit . ,(or limit 100)))
+    :done (lambda (result)
+            (when (eq (alist-get 'is_deleted result) :false)
+              (cl-coerce (alist-get 'entries result) 'list)))))
 
 (defun dropbox--search (text &optional path)
   (dropbox-request "https://api.dropboxapi.com/2/files/search_v2"
@@ -202,14 +227,24 @@
             (set-buffer-multibyte nil)
             (buffer-string))))
 
-(defun dropbox--download (path &optional zip?)
-  (setq path (dropbox-normalize path)) ; application/octet-stream
-  (when (and zip? (not (file-directory-p (dropbox-normalize path t))))
-    (user-error "Download to .zip is used for dictionay"))
+(defun dropbox--download (target &optional zip?)
+  "Download TARGET which is path, id or revision.
+When target is not path, there will be a prefix delemite with colon.
+If ZIP? is non-nil, download as a zip (for directory)."
+  (unless (or (string-prefix-p "id:" target) (string-prefix-p "rev:" target))
+    (setq target (dropbox-normalize target)))
+  (when (and zip? (not (file-directory-p (dropbox-normalize target t))))
+    (user-error "Download to .zip is used for directory"))
   (dropbox-request (concat "https://content.dropboxapi.com/2/files/download" (if zip? "_zip"))
-    :params `((arg . ,(encode-coding-string (json-encode `(("path" . ,path))) 'utf-8)))
-    :progress "Fetching"
-    :done (lambda (r) (message "") r)))
+    :cache (if (string-prefix-p "rev:" target) '(600 revision (params . arg))) ; cache only for revisions
+    :params `((arg . ,(encode-coding-string (json-encode `(("path" . ,target))) 'utf-8)))
+    :done (lambda (r) (message "") r) ; application/octet-stream
+    :progress "Fetching"))
+
+(defun dropbox--restore (revision path)
+  (dropbox-request "https://api.dropboxapi.com/2/files/restore"
+    :headers '(t json)
+    :data `((rev . ,revision) (path . ,(dropbox-normalize path)))))
 
 ;; (dropbox-token)
 ;; (dropbox--get-current-account)
@@ -620,6 +655,144 @@
 (defun dropbox-handle:file-selinux-context (&rest _) nil)
 
 
+;;; Revisions
+
+(defvar dropbox-revisions-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'dropbox-revision-open)
+    (define-key map (kbd "d")   #'dropbox-revision-diff)
+    (define-key map (kbd "R")   #'dropbox-revision-restore)
+    (define-key map (kbd "w")   #'dropbox-revision-download)
+    (define-key map (kbd "g")   #'dropbox-revisions-refresh)
+    (define-key map (kbd "q")   #'quit-window)
+    map)
+  "Keymap for Dropbox revisions mode.")
+
+(define-derived-mode dropbox-revisions-mode special-mode "Dropbox Revisions"
+  "Major mode for listing Dropbox file revisions."
+  (setq-local truncate-lines t)
+  (setq-local cursor-type 'box))
+
+(defvar-local dropbox-revisions--path nil)
+
+(defun dropbox-revisions (path)
+  "Fetch and display revisions for PATH."
+  (interactive (list (if (derived-mode-p 'dired-mode)
+                         (dired-get-filename)
+                       buffer-file-name)))
+  (unless (and (dropbox-file-p path) (file-regular-p path))
+    (user-error "%s is not a Dropbox file" path))
+  (message "Fetching revisions for %s..." path)
+  (pdd-then (dropbox--list-revisions (dropbox-normalize path))
+    (lambda (revisions)
+      (let ((buf-name "*Dropbox Revisions*"))
+        (if (cdr revisions)
+            (with-current-buffer (get-buffer-create buf-name)
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (dropbox-revisions-mode)
+                (setq dropbox-revisions--path path)
+                (setq-local header-line-format
+                            (concat " Revisions for: "
+                                    (propertize path 'face 'font-lock-string-face)
+                                    "    Keys: [RET] open [d] diff [w] save as [q] quit"))
+                (insert "\n")
+                (insert (propertize "REV                    Last Modified        Size      Path\n" 'face 'bold))
+                (insert (propertize "---------------------  -------------------  --------  -------------\n" 'face 'bold))
+                (if (not revisions)
+                    (insert "(No revisions found or file is deleted)\n")
+                  (dolist (rev revisions)
+                    (let ((start (point))
+                          (line (format "%s  %s  %8s  %s"
+                                        (propertize (alist-get 'rev rev) 'face 'font-lock-comment-face)
+                                        (format-time-string
+                                         "%Y-%m-%d %H:%M:%S" (pdd-encode-time-string (alist-get 'server_modified rev)))
+                                        (file-size-human-readable (alist-get 'size rev))
+                                        (alist-get 'path_display rev))))
+                      (insert (concat line (if (= (line-number-at-pos) 4) "  (current)") "\n"))
+                      (put-text-property start (1- (point)) 'dropbox-revision-entry rev)
+                      (put-text-property start (1- (point)) 'mouse-face 'highlight)
+                      (put-text-property start (1- (point)) 'help-echo (alist-get 'id rev)))))
+                (pop-to-buffer (current-buffer) '((display-buffer-reuse-window display-buffer-below-selected)))
+                (goto-char (point-min))
+                (forward-line 3)
+                (message "")))
+          (let ((buf (get-buffer buf-name)))
+            (when (and buf (get-buffer-window buf))
+              (with-current-buffer buf (kill-buffer-and-window))))
+          (message "No revisions found for %s (or file might be deleted)." path))))
+    (lambda (err)
+      (message "Error fetching revisions: %s" err))))
+
+(defun dropbox-revisions-refresh ()
+  "Refresh the list of revisions."
+  (interactive nil dropbox-revisions-mode)
+  (unless (derived-mode-p 'dropbox-revisions-mode)
+    (user-error "Not in a Dropbox Revisions buffer"))
+  (dropbox-revisions dropbox-revisions--path))
+
+(defun dropbox-revision-at-point ()
+  "Return the revision entry (alist) at point."
+  (or (save-excursion
+        (beginning-of-line)
+        (get-text-property (point) 'dropbox-revision-entry))
+      (user-error "No revision found at point")))
+
+(defun dropbox-revision-open (revision)
+  "Open REVISION in buffer."
+  (interactive (list (dropbox-revision-at-point)) dropbox-revisions-mode)
+  (pdd-then (dropbox--download (concat "rev:" (alist-get 'rev revision)))
+    (lambda (content)
+      (dropbox-temp-file-buffer
+       (format "[%s] %s" (alist-get 'rev revision) (alist-get 'name revision))
+       content '((display-buffer-same-window))))))
+
+(defun dropbox-revision-diff (revision)
+  "Show diff between current REVISION and the previous version."
+  (interactive (list (dropbox-revision-at-point)) dropbox-revisions-mode)
+  (pdd-let* ((path (alist-get 'path_display revision))
+             (revs (await (dropbox--list-revisions path)))
+             (prev (cadr (nthcdr (cl-position-if (lambda (x)
+                                                   (equal (alist-get 'rev x) (alist-get 'rev revision)))
+                                                 revs)
+                                 revs))))
+    (if prev
+        (let* ((content1 (await (dropbox--download (concat "rev:" (alist-get 'rev prev)))))
+               (content2 (await (dropbox--download (concat "rev:" (alist-get 'rev revision)))))
+               (display-buffer-alist '((".*" display-buffer-same-window))))
+          (diff-buffers (dropbox-temp-file-buffer path content1)
+                        (dropbox-temp-file-buffer path content2)))
+      (message "This is already the oldest revision, no target to compare with."))))
+
+(defun dropbox-revision-restore (revision &optional path)
+  "Restore a REVISION to a remote file in PATH."
+  (interactive (list (dropbox-revision-at-point)) dropbox-revisions-mode)
+  (unless path
+    (setq path (read-file-name "Restore to: " nil (alist-get 'path_display revision))))
+  (let ((pdd-sync nil))
+    (pdd-then (dropbox--restore (alist-get 'rev revision) path)
+      (lambda (_)
+        (when (equal (alist-get 'path_display revision) (dropbox-normalize path))
+          (dropbox-revisions-refresh))
+        (message "Restored to `%s'" path))
+      (lambda (r) (message "Restore failed: %s" r)))))
+
+(defun dropbox-revision-download (revision &optional path)
+  "Download a Dropbox REVISION to a loacal PATH."
+  (interactive (list (dropbox-revision-at-point)) dropbox-revisions-mode)
+  (unless path
+    (setq path (read-file-name "Download to: " "~/"
+                               (file-name-nondirectory (alist-get 'path_display revision)))))
+  (when (directory-name-p path)
+    (setq path (expand-file-name (alist-get 'name revision) path)))
+  (let ((pdd-sync t))
+    (pdd-then (dropbox--download (concat "rev:" (alist-get 'rev revision)))
+      (lambda (content)
+        (let ((coding-system-for-write 'no-conversion))
+          (write-region content nil path)))
+      (lambda (r) (message "Download failed: %s" r)))))
+
+
 ;;; Patches
 
 (declare-function project--find-in-directory "ext:project.el" t t)
@@ -674,6 +847,16 @@ will allow you specify a dir to search."
     (unless (string-prefix-p "/" path)
       (user-error "Maybe you input a invalid path"))
     (browse-url (concat home path))))
+
+;;;###autoload
+(defun dropbox-clear-cache (&optional key)
+  "Clear KEY from default cache storage. If KEY is nil then clear all."
+  (interactive)
+  (if key
+      (remhash key dropbox--shared-storage)
+    (clrhash dropbox--shared-storage))
+  (when (called-interactively-p 'any)
+    (message "Cleared.")))
 
 ;;;###autoload
 (add-to-list 'file-name-handler-alist

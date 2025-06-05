@@ -42,7 +42,7 @@ Remote files are opened in local Emacs buffers. Edit the buffer as you normally 
 
 ### Dired Mode Operations
 
-When you open a remote Dropbox directory (e.g., `/db:/path/to/folder/`), it will be displayed in Dired mode. You can perform many standard Dired operations, which will be applied to your remote Dropbox files:
+When you open a remote Dropbox directory (e.g., `/db:/path/to/folder/`), it will be displayed in Dired mode. You can perform many standard Dired operations, which will be applied to your remote Dropbox files. e.g.:
 
 - `D`: Delete the marked remote file(s) or directory.
 - `C`: Copie file(s) or directory between Dropbox and local
@@ -51,11 +51,11 @@ When you open a remote Dropbox directory (e.g., `/db:/path/to/folder/`), it will
 - `R`: Rename or move files/directories. The logic is similar to the C (Copy) command.
 - `+`: Create a new directory on Dropbox.
 - `C-x C-f path-not-exist.txt`: Create new file (when save)
-- Some other standard Dired commands are also supported, just try
 
 ### Other commands
 
-- `dropbox-browser`: Opens the current Dropbox directory (or your Dropbox root if not in a Dropbox Dired buffer) in your default web browser.
+- `dropbox-revisions`: In a Dired mode or a remote file buffer, invoke this command will popup a buffer to view and operate the revisions (diff, download, restore and so on)
+- `dropbox-browser`: Open the current Dropbox directory (or your Dropbox root if not in a Dropbox Dired buffer) in your default web browser.
 
 ## Miscellaneous
 
