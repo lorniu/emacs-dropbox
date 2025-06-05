@@ -70,6 +70,19 @@
 (defun dropbox-file-p (filename)
   (string-prefix-p dropbox-prefix filename))
 
+(defun dropbox-file-at-point (&optional allow-dir)
+  "Return Dropbox path at point."
+  (let ((path (if (derived-mode-p 'dired-mode)
+                  (dired-get-filename)
+                buffer-file-name)))
+    (unless path
+      (user-error "No Dropbox file found at point"))
+    (unless (dropbox-file-p path)
+      (user-error "Not a Dropbox file: %s" path))
+    (when (and (null allow-dir) (file-directory-p path))
+      (user-error "Directory is not allowed: %s" path))
+    path))
+
 (defun dropbox-temp-file-buffer (filename content &optional pop rw post)
   (let* ((prefix (concat (file-name-sans-extension (file-name-nondirectory filename)) "-"))
          (extension (file-name-extension filename))
@@ -90,7 +103,8 @@
   (declare (indent 1))
   (pdd-then (unless (string-match-p "/oauth2" url) (dropbox-token))
     (lambda (token)
-      (let ((pdd-headers (if token `((bear ,token))))
+      (let ((pdd-sync (eq pdd-sync t))
+            (pdd-headers (if token `((bear ,token))))
             (pdd-active-cacher nil)
             (pdd-shared-cache-storage dropbox--shared-storage)
             (pdd-backend dropbox-http-backend))
@@ -236,7 +250,7 @@ If ZIP? is non-nil, download as a zip (for directory)."
   (when (and zip? (not (file-directory-p (dropbox-normalize target t))))
     (user-error "Download to .zip is used for directory"))
   (dropbox-request (concat "https://content.dropboxapi.com/2/files/download" (if zip? "_zip"))
-    :cache (if (string-prefix-p "rev:" target) '(600 revision (params . arg))) ; cache only for revisions
+    :cache (if (string-prefix-p "rev:" target) '(1800 revision (params . arg))) ; cache only for revisions
     :params `((arg . ,(encode-coding-string (json-encode `(("path" . ,target))) 'utf-8)))
     :done (lambda (r) (message "") r) ; application/octet-stream
     :progress "Fetching"))
@@ -245,6 +259,35 @@ If ZIP? is non-nil, download as a zip (for directory)."
   (dropbox-request "https://api.dropboxapi.com/2/files/restore"
     :headers '(t json)
     :data `((rev . ,revision) (path . ,(dropbox-normalize path)))))
+
+(defun dropbox--create-shared-link (path &optional settings)
+  (dropbox-request "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings"
+    :headers '(t json)
+    :data `((path . ,(dropbox-normalize path))
+            (settings . ,(or settings
+                             `(("access" . "viewer")
+                               ("allow_download" . t)
+                               ("audience" . "public")
+                               ("requested_visibility" . "public")))))
+    :done (lambda (r) (alist-get 'url r))))
+
+(defun dropbox--list-shared-links (&optional path)
+  (dropbox-request "https://api.dropboxapi.com/2/sharing/list_shared_links"
+    :cache `(5 shared ,(if path '(data . path)))
+    :headers '(t json)
+    :data (if path `((path . ,(dropbox-normalize path))) "null")
+    :done (lambda (r) (cl-coerce (alist-get 'links r) 'list))))
+
+(defun dropbox--revoke-shared-link (url)
+  (dropbox-request "https://api.dropboxapi.com/2/sharing/revoke_shared_link"
+    :headers '(t json)
+    :data `((url . ,url))))
+
+(defun dropbox--get-temporary-link (path)
+  (dropbox-request "https://api.dropboxapi.com/2/files/get_temporary_link"
+    :headers '(t json)
+    :data `((path . ,(dropbox-normalize path)))
+    :done (lambda (r) (alist-get 'link r))))
 
 ;; (dropbox-token)
 ;; (dropbox--get-current-account)
@@ -287,9 +330,8 @@ If ZIP? is non-nil, download as a zip (for directory)."
         (widget-create 'link :value apps-url :notify (lambda (&rest _) (browse-url apps-url)))
         (widget-insert " to create/config a Dropbox App:
 
-   - App type: 'Scoped access', Access: 'Full Dropbox'.
-   - Permissions: Grant 'files.metadata.read/write', 'files.content.read/write'.
-   - Settings: Note your 'App key' and 'App secret'.
+   - Permissions: Grant 'files.metadata.read/write', 'files.content.read/write' and more.
+   - Settings: Record your 'App key' and 'App secret'.
 
 2. Input 'App key' & 'App secret' that get from step 1\n\n")
         (setq wkey (widget-create 'editable-field :size 16 :format "   App key:    %v\n\n"))
@@ -577,8 +619,7 @@ If ZIP? is non-nil, download as a zip (for directory)."
 (defun dropbox-handle:write-region (beg end filename &optional append visit _lockname _mustbenew)
   (dropbox-log "[handler] write-region: %s, %s, %s" filename beg end)
   (cl-assert (not append))
-  (let ((pdd-sync nil)
-        (buffer (current-buffer))
+  (let ((buffer (current-buffer))
         (tmpfile (make-temp-file (file-name-nondirectory filename)))
         (coding-system-for-write buffer-file-coding-system))
     (condition-case err
@@ -769,13 +810,12 @@ If ZIP? is non-nil, download as a zip (for directory)."
   (interactive (list (dropbox-revision-at-point)) dropbox-revisions-mode)
   (unless path
     (setq path (read-file-name "Restore to: " nil (alist-get 'path_display revision))))
-  (let ((pdd-sync nil))
-    (pdd-then (dropbox--restore (alist-get 'rev revision) path)
-      (lambda (_)
-        (when (equal (alist-get 'path_display revision) (dropbox-normalize path))
-          (dropbox-revisions-refresh))
-        (message "Restored to `%s'" path))
-      (lambda (r) (message "Restore failed: %s" r)))))
+  (pdd-then (dropbox--restore (alist-get 'rev revision) path)
+    (lambda (_)
+      (when (equal (alist-get 'path_display revision) (dropbox-normalize path))
+        (dropbox-revisions-refresh))
+      (message "Restored to `%s'" path))
+    (lambda (r) (message "Restore failed: %s" r))))
 
 (defun dropbox-revision-download (revision &optional path)
   "Download a Dropbox REVISION to a loacal PATH."
@@ -849,12 +889,64 @@ will allow you specify a dir to search."
     (browse-url (concat home path))))
 
 ;;;###autoload
-(defun dropbox-clear-cache (&optional key)
-  "Clear KEY from default cache storage. If KEY is nil then clear all."
+(defun dropbox-shared-link (path)
+  "Return or create the shared link of PATH."
+  (interactive (list (dropbox-file-at-point 'allow-dir)))
+  (pdd-chain (dropbox--list-shared-links)
+    (lambda (links)
+      (if-let* ((link (cl-find-if (lambda (link)
+                                    (pdd-ci-equal (alist-get 'path_lower link)
+                                                  (dropbox-normalize path)))
+                                  links)))
+          (alist-get 'url link)
+        (dropbox--create-shared-link path)))
+    (lambda (url)
+      (kill-new url)
+      (dropbox-clear-cache (lambda (key) (eq (car-safe key) 'shared)))
+      (message "Saved in kill ring: %s" (propertize url 'face 'font-lock-string-face)))
+    :fail
+    (lambda (r) (message "Failed to get shared link: %s" r))))
+
+;;;###autoload
+(defun dropbox-shared-link-revoke ()
+  "Revoke shared link."
   (interactive)
-  (if key
-      (remhash key dropbox--shared-storage)
-    (clrhash dropbox--shared-storage))
+  (let* ((pdd-sync t)
+         (links (or (dropbox--list-shared-links)
+                    (user-error "No shared links found")))
+         (cands (mapcar (lambda (item) (cons (alist-get 'path_lower item) item)) links))
+         (path (completing-read "Shared link to revoke: "
+                                cands nil t nil nil
+                                (ignore-errors (dropbox-normalize (dropbox-file-at-point t)))))
+         (entry (alist-get path cands nil nil #'equal))
+         (url (alist-get 'url entry)))
+    (dropbox--revoke-shared-link url)
+    (dropbox-clear-cache (lambda (key) (eq (car-safe key) 'shared)))
+    (message "Revoke done: `%s'." url)))
+
+;;;###autoload
+(defun dropbox-download-link (&optional path)
+  "Get the temporary link of PATH for download."
+  (interactive (list (dropbox-file-at-point)))
+  (pdd-then (dropbox--get-temporary-link path)
+    (lambda (link)
+      (kill-new link)
+      (message "Saved in kill ring: %s" (propertize link 'face 'font-lock-string-face)))
+    (lambda (r)
+      (message "Failed to get download link: %s" r))))
+
+;;;###autoload
+(defun dropbox-clear-cache (&optional key)
+  "Clear KEY from default cache storage.
+If KEY is nil then clear all. KEY also can be a function."
+  (interactive)
+  (cond ((functionp key)
+         (maphash (lambda (k _)
+                    (when (funcall key k)
+                      (remhash k dropbox--shared-storage)))
+                  dropbox--shared-storage))
+        (key (remhash key dropbox--shared-storage))
+        (t (clrhash dropbox--shared-storage)))
   (when (called-interactively-p 'any)
     (message "Cleared.")))
 

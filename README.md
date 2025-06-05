@@ -54,8 +54,10 @@ When you open a remote Dropbox directory (e.g., `/db:/path/to/folder/`), it will
 
 ### Other commands
 
-- `dropbox-revisions`: In a Dired mode or a remote file buffer, invoke this command will popup a buffer to view and operate the revisions (diff, download, restore and so on)
 - `dropbox-browser`: Open the current Dropbox directory (or your Dropbox root if not in a Dropbox Dired buffer) in your default web browser.
+- `dropbox-revisions`: In a Dired mode or a remote file buffer, invoke this command will popup a buffer to view and operate the revisions (diff, download, restore and so on).
+- `dropbox-shared-link/dropbox-shared-link-revoke`: Generate/revoke a link for current remote file/dir, which can be shared with others.
+- `dropbox-download-link`: Generate a temporary link for current remote file, which can be used by download tool like `curl`.
 
 ## Miscellaneous
 
