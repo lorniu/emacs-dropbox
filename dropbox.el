@@ -301,15 +301,15 @@ If CACHE-DISK? is non-nil, force cache to disk."
                ;; cache revisions to memory
                '(1800 revision (params . arg))
              (when-let* ((meta (dropbox--get-metadata target t))
-                         (cfile (concat (expand-file-name (alist-get 'id meta) dropbox-disk-cache-location) ":000.cache")))
+                         (key (substring (alist-get 'id meta) 3)) ; windows not support : in path
+                         (cfile (concat (expand-file-name key dropbox-disk-cache-location) "@000.cache")))
                ;; cache some files to local disk
                (when (or (file-exists-p cfile) cache-disk? (string-match-p dropbox-disk-cache-url-regexp target))
                  (list (lambda () ; cache alive when content_hash is same
                          (and (file-exists-p cfile)
                               (equal (dropbox-content-hash cfile) (alist-get 'content_hash meta))
                               (message "Found in cache (clear with `dropbox-clear-cache-on-disk').")))
-                       (alist-get 'id meta) ; key
-                       (cons 'store dropbox-disk-cache-location))))) ;storage
+                       key (cons 'store dropbox-disk-cache-location)))))
     :params `((arg . ,(encode-coding-string (json-encode `(("path" . ,target))) 'utf-8)))
     :done (lambda (r) (message "") r) ; response type: application/octet-stream
     :progress "Fetching"))
@@ -635,7 +635,8 @@ If CACHE-DISK? is non-nil, force cache to disk."
          (create-row (lambda (entry)
                        (let* ((name (alist-get 'name entry))
                               (cache (when (equal (alist-get '.tag entry) "file")
-                                       (file-exists-p (concat (expand-file-name (alist-get 'id entry) dropbox-disk-cache-location) ":000.cache"))))
+                                       (file-exists-p (concat (expand-file-name (substring (alist-get 'id entry) 3) dropbox-disk-cache-location)
+                                                              "@000.cache"))))
                               (attrs (dropbox-handle:file-attributes name nil entry))
                               (prefix (format "%s %s %2d %2s %2s %8s %s "
                                               (if cache "↓" " ")
@@ -687,12 +688,14 @@ If CACHE-DISK? is non-nil, force cache to disk."
   (dropbox-log "[handler] insert-file-contents: %s" filename)
   (let* ((recentf-list nil)
          (tmpfile (make-temp-file (file-name-nondirectory filename))))
-    (condition-case err
+    (unwind-protect
         (let ((pdd-sync t) count)
           (when (file-exists-p filename)
-            (with-temp-file tmpfile
+            (with-temp-buffer
               (set-buffer-multibyte nil)
-              (insert (dropbox--download filename nil current-prefix-arg)))
+              (insert (dropbox--download filename nil current-prefix-arg))
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region nil nil tmpfile nil 'no-message)))
             (if replace (erase-buffer))
             (insert-file-contents tmpfile visit beg end)
             (setq count (buffer-size)))
@@ -701,8 +704,7 @@ If CACHE-DISK? is non-nil, force cache to disk."
             (setf buffer-read-only (not (file-writable-p filename)))
             (set-visited-file-modtime (current-time))) ; assume that no concurrent edit
           (cons filename count))
-      (error (ignore-errors (delete-file tmpfile))
-             (signal 'user-error (cdr err))))))
+      (ignore-errors (delete-file tmpfile)))))
 
 (defun dropbox-handle:write-region (beg end filename &optional append visit _lockname _mustbenew)
   (dropbox-log "[handler] write-region: %s, %s, %s" filename beg end)
@@ -712,7 +714,8 @@ If CACHE-DISK? is non-nil, force cache to disk."
          (tmpfile (make-temp-file (file-name-nondirectory filename)))
          (coding-system-for-write buffer-file-coding-system))
     (condition-case err
-        (let ((inhibit-modification-hooks t))
+        (let ((inhibit-modification-hooks t)
+              (coding-system-for-write 'no-conversion))
           (write-region beg end tmpfile nil 'no-message))
       (error (ignore-errors (delete-file tmpfile))
              (user-error "Write error: %s" err)))
